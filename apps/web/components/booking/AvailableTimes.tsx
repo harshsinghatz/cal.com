@@ -12,19 +12,6 @@ import { SkeletonContainer, SkeletonText, ToggleGroup } from "@calcom/ui";
 import classNames from "@lib/classNames";
 import { timeZone } from "@lib/clock";
 
-type AvailableTimesProps = {
-  timeFormat: TimeFormat;
-  onTimeFormatChange: (is24Hour: boolean) => void;
-  eventTypeId: number;
-  recurringCount: number | undefined;
-  eventTypeSlug: string;
-  date?: Dayjs;
-  seatsPerTimeSlot?: number | null;
-  slots?: Slot[];
-  isLoading: boolean;
-  ethSignature?: string;
-};
-
 const AvailableTimes: FC<AvailableTimesProps> = ({
   slots = [],
   isLoading,
