@@ -16,7 +16,7 @@ const tabs = [
 
 export default function AppsShell({ children }: { children: React.ReactNode }) {
   const { status } = useSession();
-
+  console.log("This is app");
   return (
     <>
       <div className="mb-12 block lg:hidden">{status === "authenticated" && <NavTabs tabs={tabs} />}</div>
