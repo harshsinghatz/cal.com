@@ -5,6 +5,8 @@ import type { LocationObject } from "@calcom/app-store/locations";
 import { privacyFilteredLocations } from "@calcom/app-store/locations";
 import { getAppFromSlug } from "@calcom/app-store/utils";
 import dayjs from "@calcom/dayjs";
+import getBooking from "@calcom/features/bookings/lib/get-booking";
+import type { GetBookingType } from "@calcom/features/bookings/lib/get-booking";
 import { getBookingFieldsWithSystemFields } from "@calcom/features/bookings/lib/getBookingFields";
 import { parseRecurringEvent } from "@calcom/lib";
 import {
@@ -14,6 +16,7 @@ import {
   getUsernameList,
 } from "@calcom/lib/defaultEvents";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
+import { markdownToSafeHTML } from "@calcom/lib/markdownToSafeHTML";
 import prisma, { bookEventTypeSelect } from "@calcom/prisma";
 import {
   customInputSchema,
@@ -21,10 +24,9 @@ import {
   userMetadata as userMetadataSchema,
 } from "@calcom/prisma/zod-utils";
 
-import type { GetBookingType } from "@lib/getBooking";
-import getBooking from "@lib/getBooking";
 import type { inferSSRProps } from "@lib/types/inferSSRProps";
 
+import PageWrapper from "@components/PageWrapper";
 import BookingPage from "@components/booking/pages/BookingPage";
 
 import { ssrInit } from "@server/lib/ssr";
@@ -34,12 +36,12 @@ export type BookPageProps = inferSSRProps<typeof getServerSideProps>;
 export default function Book(props: BookPageProps) {
   const { t } = useLocale();
   return props.away ? (
-    <div className="h-screen dark:bg-gray-900">
+    <div className="dark:bg-inverted h-screen">
       <main className="mx-auto max-w-3xl px-4 py-24">
         <div className="space-y-6" data-testid="event-types">
           <div className="overflow-hidden rounded-sm border dark:border-gray-900">
-            <div className="p-8 text-center text-gray-400 dark:text-white">
-              <h2 className="font-cal mb-2 text-3xl text-gray-600 dark:text-white">
+            <div className="text-muted dark:text-inverted p-8 text-center">
+              <h2 className="font-cal dark:text-inverted text-default mb-2 text-3xl">
                 😴{" " + t("user_away")}
               </h2>
               <p className="mx-auto max-w-md">{t("user_away_description")}</p>
@@ -49,12 +51,12 @@ export default function Book(props: BookPageProps) {
       </main>
     </div>
   ) : props.isDynamicGroupBooking && !props.profile.allowDynamicBooking ? (
-    <div className="h-screen dark:bg-gray-900">
+    <div className="dark:bg-inverted h-screen">
       <main className="mx-auto max-w-3xl px-4 py-24">
         <div className="space-y-6" data-testid="event-types">
           <div className="overflow-hidden rounded-sm border dark:border-gray-900">
-            <div className="p-8 text-center text-gray-400 dark:text-white">
-              <h2 className="font-cal mb-2 text-3xl text-gray-600 dark:text-white">
+            <div className="text-muted dark:text-inverted p-8 text-center">
+              <h2 className="font-cal dark:text-inverted text-default mb-2 text-3xl">
                 {" " + t("unavailable")}
               </h2>
               <p className="mx-auto max-w-md">{t("user_dynamic_booking_disabled")}</p>
@@ -68,7 +70,8 @@ export default function Book(props: BookPageProps) {
   );
 }
 
-Book.isThemeSupported = true;
+Book.isBookingPage = true;
+Book.PageWrapper = PageWrapper;
 
 const querySchema = z.object({
   bookingUid: z.string().optional(),
@@ -189,6 +192,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
         slug: u.username,
         theme: u.theme,
       })),
+      descriptionAsSafeHTML: markdownToSafeHTML(eventType.description),
     };
   })[0];
 
@@ -217,7 +221,9 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
       rescheduleUid = bookingSeat.booking.uid;
       attendeeEmail = bookingSeat.attendee.email;
     }
-  } else if (eventTypeRaw.seatsPerTimeSlot && query.duration && query.date) {
+  }
+
+  if (query.duration) {
     // If it's not reschedule but event Type has seats we should obtain
     // the bookingUid regardless and use it to get the booking
     const currentSeats = await prisma.booking.findFirst({
@@ -237,11 +243,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 
   let booking: GetBookingType | null = null;
   if (rescheduleUid || query.bookingUid || bookingUidWithSeats) {
-    booking = await getBooking(
-      prisma,
-      rescheduleUid || query.bookingUid || bookingUidWithSeats || "",
-      eventTypeObject.bookingFields
-    );
+    booking = await getBooking(prisma, rescheduleUid || query.bookingUid || bookingUidWithSeats || "");
   }
 
   if (rescheduleEventTypeHasSeats && booking?.attendees && booking?.attendees.length > 0) {
@@ -285,12 +287,15 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
         : eventType.recurringEvent.count)) ||
     null;
 
+  const currentSlotBooking = await getBooking(prisma, bookingUidWithSeats || "");
+
   return {
     props: {
       away: user.away,
       profile,
       eventType: eventTypeObject,
       booking,
+      currentSlotBooking: currentSlotBooking,
       recurringEventCount,
       trpcState: ssr.dehydrate(),
       isDynamicGroupBooking,

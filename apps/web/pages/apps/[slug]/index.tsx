@@ -3,15 +3,35 @@ import matter from "gray-matter";
 import MarkdownIt from "markdown-it";
 import type { GetStaticPaths, GetStaticPropsContext } from "next";
 import path from "path";
+import { z } from "zod";
 
 import { getAppWithMetadata } from "@calcom/app-store/_appRegistry";
+import { getAppAssetFullPath } from "@calcom/app-store/getAppAssetFullPath";
 import prisma from "@calcom/prisma";
 
 import type { inferSSRProps } from "@lib/types/inferSSRProps";
 
+import PageWrapper from "@components/PageWrapper";
 import App from "@components/apps/App";
 
 const md = new MarkdownIt("default", { html: true, breaks: true });
+
+const sourceSchema = z.object({
+  content: z.string(),
+  data: z.object({
+    description: z.string().optional(),
+    items: z
+      .array(
+        z.union([
+          z.string(),
+          z.object({
+            iframe: z.object({ src: z.string() }),
+          }),
+        ])
+      )
+      .optional(),
+  }),
+});
 
 function SingleAppPage({ data, source }: inferSSRProps<typeof getStaticProps>) {
   return (
@@ -33,7 +53,7 @@ function SingleAppPage({ data, source }: inferSSRProps<typeof getStaticProps>) {
       email={data.email}
       licenseRequired={data.licenseRequired}
       isProOnly={data.isProOnly}
-      images={source.data?.items as string[] | undefined}
+      descriptionItems={source.data?.items as string[] | undefined}
       isTemplate={data.isTemplate}
       dependencies={data.dependencies}
       //   tos="https://zoom.us/terms"
@@ -85,12 +105,15 @@ export const getStaticProps = async (ctx: GetStaticPropsContext) => {
     source = singleApp.description;
   }
 
-  const { content, data } = matter(source);
+  const result = matter(source);
+  const { content, data } = sourceSchema.parse({ content: result.content, data: result.data });
   if (data.items) {
-    data.items = data.items.map((item: string) => {
-      if (!item.includes("/api/app-store")) {
-        // Make relative paths absolute
-        return `/api/app-store/${appDirname}/${item}`;
+    data.items = data.items.map((item) => {
+      if (typeof item === "string") {
+        return getAppAssetFullPath(item, {
+          dirName: singleApp.dirName,
+          isTemplate: singleApp.isTemplate,
+        });
       }
       return item;
     });
@@ -102,5 +125,7 @@ export const getStaticProps = async (ctx: GetStaticPropsContext) => {
     },
   };
 };
+
+SingleAppPage.PageWrapper = PageWrapper;
 
 export default SingleAppPage;

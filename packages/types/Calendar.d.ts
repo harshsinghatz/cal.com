@@ -3,7 +3,9 @@ import type { Dayjs } from "dayjs";
 import type { calendar_v3 } from "googleapis";
 import type { Time } from "ical.js";
 import type { TFunction } from "next-i18next";
+import type z from "zod";
 
+import type { bookingResponse } from "@calcom/features/bookings/lib/getBookingResponsesSchema";
 import type { Calendar } from "@calcom/features/calendars/weeklyview";
 import type { TimeFormat } from "@calcom/lib/timeFormat";
 import type { Frequency } from "@calcom/prisma/zod-utils";
@@ -16,6 +18,9 @@ type PaymentInfo = {
   link?: string | null;
   reason?: string | null;
   id?: string | null;
+  paymentOption?: string | null;
+  amount?: number;
+  currency?: string;
 };
 
 export type Person = {
@@ -59,6 +64,7 @@ export type NewCalendarEventType = {
   password: string;
   url: string;
   additionalInfo: AdditionalInfo;
+  iCalUID?: string | null;
 };
 
 export type CalendarEventType = {
@@ -104,12 +110,6 @@ export interface ConferenceData {
   createRequest?: calendar_v3.Schema$CreateConferenceRequest;
 }
 
-export interface AdditionalInformation {
-  conferenceData?: ConferenceData;
-  entryPoints?: EntryPoint[];
-  hangoutLink?: string;
-}
-
 export interface RecurringEvent {
   dtstart?: Date | undefined;
   interval: number;
@@ -134,6 +134,14 @@ export type AppsStatus = {
   errors: string[];
   warnings?: string[];
 };
+
+export type CalEventResponses = Record<
+  string,
+  {
+    label: string;
+    value: z.infer<typeof bookingResponse>;
+  }
+>;
 
 // If modifying this interface, probably should update builders/calendarEvent files
 export interface CalendarEvent {
@@ -168,24 +176,13 @@ export interface CalendarEvent {
   seatsShowAttendees?: boolean | null;
   attendeeSeatId?: string;
   seatsPerTimeSlot?: number | null;
+  iCalUID?: string | null;
 
   // It has responses to all the fields(system + user)
-  responses?: Record<
-    string,
-    {
-      value: string | string[];
-      label: string;
-    }
-  > | null;
+  responses?: CalEventResponses | null;
 
   // It just has responses to only the user fields. It allows to easily iterate over to show only user fields
-  userFieldsResponses?: Record<
-    string,
-    {
-      value: string | string[];
-      label: string;
-    }
-  > | null;
+  userFieldsResponses?: CalEventResponses | null;
 }
 
 export interface EntryPoint {

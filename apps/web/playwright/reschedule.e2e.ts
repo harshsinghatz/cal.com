@@ -4,6 +4,7 @@ import { BookingStatus } from "@prisma/client";
 import prisma from "@calcom/prisma";
 
 import { test } from "./lib/fixtures";
+import { testBothBookers } from "./lib/new-booker";
 import { selectFirstAvailableTimeSlotNextMonth } from "./lib/testUtils";
 
 const IS_STRIPE_ENABLED = !!(
@@ -16,7 +17,7 @@ test.describe.configure({ mode: "parallel" });
 
 test.afterEach(({ users }) => users.deleteAll());
 
-test.describe("Reschedule Tests", async () => {
+testBothBookers.describe("Reschedule Tests", async () => {
   test("Should do a booking request reschedule from /bookings", async ({ page, users, bookings }) => {
     const user = await users.create();
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -97,12 +98,19 @@ test.describe("Reschedule Tests", async () => {
 
     await expect(page.locator("[data-testid=success-page]")).toBeVisible();
 
-    // NOTE: remove if old booking should not be deleted
-    expect(await (await booking.self()).status).toBe(BookingStatus.CANCELLED);
+    const newBooking = await prisma.booking.findFirstOrThrow({ where: { fromReschedule: booking.uid } });
+    const rescheduledBooking = await prisma.booking.findFirstOrThrow({ where: { uid: booking.uid } });
 
-    const newBooking = await prisma.booking.findFirst({ where: { fromReschedule: booking.uid } });
     expect(newBooking).not.toBeNull();
-    await prisma.booking.delete({ where: { id: newBooking?.id } });
+    expect(rescheduledBooking.status).toBe(BookingStatus.CANCELLED);
+
+    await prisma.booking.deleteMany({
+      where: {
+        id: {
+          in: [newBooking.id, rescheduledBooking.id],
+        },
+      },
+    });
   });
 
   test("Unpaid rescheduling should go to payment page", async ({ page, users, bookings, payments }) => {
@@ -148,7 +156,6 @@ test.describe("Reschedule Tests", async () => {
     });
 
     await expect(page).toHaveURL(/.*payment/);
-    await payment.delete();
   });
 
   test("Paid rescheduling should go to success page", async ({ page, users, bookings, payments }) => {
@@ -172,8 +179,6 @@ test.describe("Reschedule Tests", async () => {
     await page.locator('[data-testid="confirm-reschedule-button"]').click();
 
     await expect(page).toHaveURL(/.*booking/);
-
-    await payment.delete();
   });
 
   test("Opt in event should be PENDING when rescheduled by USER", async ({ page, users, bookings }) => {

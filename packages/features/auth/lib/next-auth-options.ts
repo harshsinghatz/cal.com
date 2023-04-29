@@ -1,29 +1,21 @@
-import type { UserPermissionRole } from "@prisma/client";
+import type { UserPermissionRole, Membership, Team } from "@prisma/client";
 import { IdentityProvider } from "@prisma/client";
-import { readFileSync } from "fs";
-import Handlebars from "handlebars";
-import { SignJWT } from "jose";
 import type { AuthOptions, Session } from "next-auth";
 import { encode } from "next-auth/jwt";
 import type { Provider } from "next-auth/providers";
 import CredentialsProvider from "next-auth/providers/credentials";
 import EmailProvider from "next-auth/providers/email";
 import GoogleProvider from "next-auth/providers/google";
-import type { TransportOptions } from "nodemailer";
-import nodemailer from "nodemailer";
-import { authenticator } from "otplib";
-import path from "path";
 
 import checkLicense from "@calcom/features/ee/common/server/checkLicense";
 import ImpersonationProvider from "@calcom/features/ee/impersonation/lib/ImpersonationProvider";
-import jackson from "@calcom/features/ee/sso/lib/jackson";
 import { clientSecretVerifier, hostedCal, isSAMLLoginEnabled } from "@calcom/features/ee/sso/lib/saml";
-import { APP_NAME, IS_TEAM_BILLING_ENABLED, WEBAPP_URL, WEBSITE_URL } from "@calcom/lib/constants";
+import { IS_TEAM_BILLING_ENABLED, WEBAPP_URL } from "@calcom/lib/constants";
 import { symmetricDecrypt } from "@calcom/lib/crypto";
 import { defaultCookies } from "@calcom/lib/default-cookies";
+import { isENVDev } from "@calcom/lib/env";
 import { randomString } from "@calcom/lib/random";
 import rateLimit from "@calcom/lib/rateLimit";
-import { serverConfig } from "@calcom/lib/serverConfig";
 import slugify from "@calcom/lib/slugify";
 import prisma from "@calcom/prisma";
 import { teamMetadataSchema, userMetadata } from "@calcom/prisma/zod-utils";
@@ -39,26 +31,27 @@ const { client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET } =
 const GOOGLE_LOGIN_ENABLED = process.env.GOOGLE_LOGIN_ENABLED === "true";
 const IS_GOOGLE_LOGIN_ENABLED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_LOGIN_ENABLED);
 
-const transporter = nodemailer.createTransport<TransportOptions>({
-  ...(serverConfig.transport as TransportOptions),
-} as TransportOptions);
-
 const usernameSlug = (username: string) => slugify(username) + "-" + randomString(6).toLowerCase();
 
-const signJwt = async (payload: { email: string }) => {
-  const secret = new TextEncoder().encode(process.env.CALENDSO_ENCRYPTION_KEY);
-  return new SignJWT(payload)
-    .setProtectedHeader({ alg: "HS256" })
-    .setSubject(payload.email)
-    .setIssuedAt()
-    .setIssuer(WEBSITE_URL)
-    .setAudience(`${WEBSITE_URL}/auth/login`)
-    .setExpirationTime("2m")
-    .sign(secret);
+const loginWithTotp = async (user: { email: string }) =>
+  `/auth/login?totp=${await (await import("./signJwt")).default({ email: user.email })}`;
+
+type UserTeams = {
+  teams: (Membership & {
+    team: Team;
+  })[];
 };
 
-const loginWithTotp = async (user: { email: string }) =>
-  `/auth/login?totp=${await signJwt({ email: user.email })}`;
+export const checkIfUserBelongsToActiveTeam = <T extends UserTeams>(user: T) =>
+  user.teams.some((m: { team: { metadata: unknown } }) => {
+    if (!IS_TEAM_BILLING_ENABLED) {
+      return true;
+    }
+
+    const metadata = teamMetadataSchema.safeParse(m.team.metadata);
+
+    return metadata.success && metadata.data?.subscriptionId;
+  });
 
 const providers: Provider[] = [
   CredentialsProvider({
@@ -150,43 +143,34 @@ const providers: Provider[] = [
           throw new Error(ErrorCode.InternalServerError);
         }
 
-        const isValidToken = authenticator.check(credentials.totpCode, secret);
+        const isValidToken = (await import("otplib")).authenticator.check(credentials.totpCode, secret);
         if (!isValidToken) {
           throw new Error(ErrorCode.IncorrectTwoFactorCode);
         }
       }
       // Check if the user you are logging into has any active teams
-      const hasActiveTeams =
-        user.teams.filter((m: { team: { metadata: unknown } }) => {
-          if (!IS_TEAM_BILLING_ENABLED) return true;
-          const metadata = teamMetadataSchema.safeParse(m.team.metadata);
-          if (metadata.success && metadata.data?.subscriptionId) return true;
-          return false;
-        }).length > 0;
+      const hasActiveTeams = checkIfUserBelongsToActiveTeam(user);
 
       // authentication success- but does it meet the minimum password requirements?
-      if (
-        user.role === "ADMIN" &&
-        ((user.identityProvider === IdentityProvider.CAL &&
-          !isPasswordValid(credentials.password, false, true)) ||
-          !user.twoFactorEnabled)
-      ) {
-        return {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          name: user.name,
-          role: "INACTIVE_ADMIN",
-          belongsToActiveTeam: hasActiveTeams,
-        };
-      }
+      const validateRole = (role: UserPermissionRole) => {
+        // User's role is not "ADMIN"
+        if (role !== "ADMIN") return role;
+        // User's identity provider is not "CAL"
+        if (user.identityProvider !== IdentityProvider.CAL) return role;
+        // User's password is valid and two-factor authentication is enabled
+        if (isPasswordValid(credentials.password, false, true) && user.twoFactorEnabled) return role;
+        // Code is running in a development environment
+        if (isENVDev) return role;
+        // By this point it is an ADMIN without valid security conditions
+        return "INACTIVE_ADMIN";
+      };
 
       return {
         id: user.id,
         username: user.username,
         email: user.email,
         name: user.name,
-        role: user.role,
+        role: validateRole(user.role),
         belongsToActiveTeam: hasActiveTeams,
       };
     },
@@ -260,7 +244,7 @@ if (isSAMLLoginEnabled) {
           return null;
         }
 
-        const { oauthController } = await jackson();
+        const { oauthController } = await (await import("@calcom/features/ee/sso/lib/jackson")).default();
 
         // Fetch access token
         const { access_token } = await oauthController.token({
@@ -297,37 +281,14 @@ if (isSAMLLoginEnabled) {
   );
 }
 
-if (true) {
-  const emailsDir = path.resolve(process.cwd(), "..", "..", "packages/emails", "templates");
-  providers.push(
-    EmailProvider({
-      type: "email",
-      maxAge: 10 * 60 * 60, // Magic links are valid for 10 min only
-      // Here we setup the sendVerificationRequest that calls the email template with the identifier (email) and token to verify.
-      sendVerificationRequest: ({ identifier, url }) => {
-        const originalUrl = new URL(url);
-        const webappUrl = new URL(WEBAPP_URL);
-        if (originalUrl.origin !== webappUrl.origin) {
-          url = url.replace(originalUrl.origin, webappUrl.origin);
-        }
-        const emailFile = readFileSync(path.join(emailsDir, "confirm-email.html"), {
-          encoding: "utf8",
-        });
-        const emailTemplate = Handlebars.compile(emailFile);
-        transporter.sendMail({
-          from: `${process.env.EMAIL_FROM}` || APP_NAME,
-          to: identifier,
-          subject: "Your sign-in link for " + APP_NAME,
-          html: emailTemplate({
-            base_url: WEBAPP_URL,
-            signin_url: url,
-            email: identifier,
-          }),
-        });
-      },
-    })
-  );
-}
+providers.push(
+  EmailProvider({
+    type: "email",
+    maxAge: 10 * 60 * 60, // Magic links are valid for 10 min only
+    // Here we setup the sendVerificationRequest that calls the email template with the identifier (email) and token to verify.
+    sendVerificationRequest: async (props) => (await import("./sendVerificationRequest")).default(props),
+  })
+);
 
 function isNumber(n: string) {
   return !isNaN(parseFloat(n)) && !isNaN(+n);
@@ -393,6 +354,11 @@ export const AUTH_OPTIONS: AuthOptions = {
             name: true,
             email: true,
             role: true,
+            teams: {
+              include: {
+                team: true,
+              },
+            },
           },
         });
 
@@ -400,9 +366,14 @@ export const AUTH_OPTIONS: AuthOptions = {
           return token;
         }
 
+        // Check if the existingUser has any active teams
+        const belongsToActiveTeam = checkIfUserBelongsToActiveTeam(existingUser);
+        const { teams, ...existingUserWithoutTeamsField } = existingUser;
+
         return {
-          ...existingUser,
+          ...existingUserWithoutTeamsField,
           ...token,
+          belongsToActiveTeam,
         };
       };
       if (!user) {
@@ -444,7 +415,7 @@ export const AUTH_OPTIONS: AuthOptions = {
                 identityProvider: idP,
               },
               {
-                identityProviderId: account.providerAccountId as string,
+                identityProviderId: account.providerAccountId,
               },
             ],
           },
@@ -523,11 +494,11 @@ export const AUTH_OPTIONS: AuthOptions = {
           return "/auth/error?error=unverified-email";
         }
 
-        const existingUser = await prisma.user.findFirst({
+        let existingUser = await prisma.user.findFirst({
           include: {
             accounts: {
               where: {
-                provider: idP,
+                provider: account.provider,
               },
             },
           },
@@ -537,6 +508,33 @@ export const AUTH_OPTIONS: AuthOptions = {
           },
         });
 
+        /* --- START FIX LEGACY ISSUE WHERE 'identityProviderId' was accidentally set to userId --- */
+        if (!existingUser) {
+          existingUser = await prisma.user.findFirst({
+            include: {
+              accounts: {
+                where: {
+                  provider: account.provider,
+                },
+              },
+            },
+            where: {
+              identityProvider: idP,
+              identityProviderId: String(user.id),
+            },
+          });
+          if (existingUser) {
+            await prisma.user.update({
+              where: {
+                id: existingUser?.id,
+              },
+              data: {
+                identityProviderId: account.providerAccountId,
+              },
+            });
+          }
+        }
+        /* --- END FIXES LEGACY ISSUE WHERE 'identityProviderId' was accidentally set to userId --- */
         if (existingUser) {
           // In this case there's an existing user and their email address
           // hasn't changed since they last logged in.
@@ -617,7 +615,7 @@ export const AUTH_OPTIONS: AuthOptions = {
                 emailVerified: new Date(Date.now()),
                 name: user.name,
                 identityProvider: idP,
-                identityProviderId: String(user.id),
+                identityProviderId: account.providerAccountId,
               },
             });
 
@@ -640,7 +638,7 @@ export const AUTH_OPTIONS: AuthOptions = {
                 password: null,
                 email: user.email,
                 identityProvider: idP,
-                identityProviderId: String(user.id),
+                identityProviderId: account.providerAccountId,
               },
             });
             if (existingUserWithEmail.twoFactorEnabled) {
@@ -664,7 +662,7 @@ export const AUTH_OPTIONS: AuthOptions = {
             name: user.name,
             email: user.email,
             identityProvider: idP,
-            identityProviderId: String(user.id),
+            identityProviderId: account.providerAccountId,
           },
         });
 

@@ -9,6 +9,8 @@ import { userMetadata } from "@calcom/prisma/zod-utils";
 import { trpc } from "@calcom/trpc/react";
 import { Alert, Button, Form, Meta, PasswordField, Select, SettingsToggle, showToast } from "@calcom/ui";
 
+import PageWrapper from "@components/PageWrapper";
+
 type ChangePasswordSessionFormValues = {
   oldPassword: string;
   newPassword: string;
@@ -21,7 +23,8 @@ const PasswordView = () => {
   const { t } = useLocale();
   const utils = trpc.useContext();
   const { data: user } = trpc.viewer.me.useQuery();
-  const metadata = userMetadata.parse(user?.metadata);
+  const metadata = userMetadata.safeParse(user?.metadata);
+  const sessionTimeout = metadata.success ? metadata.data?.sessionTimeout : undefined;
 
   const sessionMutation = trpc.viewer.updateProfile.useMutation({
     onSuccess: () => {
@@ -36,10 +39,10 @@ const PasswordView = () => {
       const previousValue = utils.viewer.me.getData();
       const previousMetadata = userMetadata.parse(previousValue?.metadata);
 
-      if (previousValue && metadata?.sessionTimeout) {
+      if (previousValue && sessionTimeout) {
         utils.viewer.me.setData(undefined, {
           ...previousValue,
-          metadata: { ...previousMetadata, sessionTimeout: metadata?.sessionTimeout },
+          metadata: { ...previousMetadata, sessionTimeout: sessionTimeout },
         });
       }
       return { previousValue };
@@ -81,19 +84,19 @@ const PasswordView = () => {
     defaultValues: {
       oldPassword: "",
       newPassword: "",
-      sessionTimeout: metadata?.sessionTimeout,
+      sessionTimeout,
     },
   });
 
   const sessionTimeoutWatch = formMethods.watch("sessionTimeout");
 
   const handleSubmit = (values: ChangePasswordSessionFormValues) => {
-    const { oldPassword, newPassword, sessionTimeout } = values;
+    const { oldPassword, newPassword, sessionTimeout: newSessionTimeout } = values;
     if (oldPassword && newPassword) {
       passwordMutation.mutate({ oldPassword, newPassword });
     }
-    if (metadata?.sessionTimeout !== sessionTimeout) {
-      sessionMutation.mutate({ metadata: { ...metadata, sessionTimeout } });
+    if (sessionTimeout !== newSessionTimeout) {
+      sessionMutation.mutate({ metadata: { ...metadata, sessionTimeout: newSessionTimeout } });
     }
   };
 
@@ -106,19 +109,20 @@ const PasswordView = () => {
 
   const passwordMinLength = data?.user.role === "USER" ? 7 : 15;
   const isUser = data?.user.role === "USER";
+
   return (
     <>
       <Meta title={t("password")} description={t("password_description")} />
       {user && user.identityProvider !== IdentityProvider.CAL ? (
         <div>
           <div className="mt-6">
-            <h2 className="font-cal text-lg font-medium leading-6 text-gray-900">
+            <h2 className="font-cal text-emphasis text-lg font-medium leading-6">
               {t("account_managed_by_identity_provider", {
                 provider: identityProviderNameMap[user.identityProvider],
               })}
             </h2>
           </div>
-          <p className="mt-1 text-sm text-gray-500">
+          <p className="text-subtle mt-1 text-sm">
             {t("account_managed_by_identity_provider_description", {
               provider: identityProviderNameMap[user.identityProvider],
             })}
@@ -152,10 +156,10 @@ const PasswordView = () => {
               />
             </div>
           </div>
-          <p className="mt-4 max-w-[38rem] text-sm text-gray-600">
+          <p className="text-default mt-4 max-w-[38rem] text-sm">
             {t("invalid_password_hint", { passwordLength: passwordMinLength })}
           </p>
-          <div className="mt-8 border-t border-gray-200 py-8">
+          <div className="border-subtle mt-8 border-t py-8">
             <SettingsToggle
               title={t("session_timeout")}
               description={t("session_timeout_description")}
@@ -172,12 +176,12 @@ const PasswordView = () => {
             {sessionTimeoutWatch && (
               <div className="mt-4 text-sm">
                 <div className="flex items-center">
-                  <p className="text-neutral-900 ltr:mr-2 rtl:ml-2">{t("session_timeout_after")}</p>
+                  <p className="text-default ltr:mr-2 rtl:ml-2">{t("session_timeout_after")}</p>
                   <Select
                     options={timeoutOptions}
                     defaultValue={
-                      metadata?.sessionTimeout
-                        ? timeoutOptions.find((tmo) => tmo.value === metadata.sessionTimeout)
+                      sessionTimeout
+                        ? timeoutOptions.find((tmo) => tmo.value === sessionTimeout)
                         : timeoutOptions[1]
                     }
                     isSearchable={false}
@@ -195,6 +199,7 @@ const PasswordView = () => {
             color="primary"
             className="mt-8"
             type="submit"
+            onClick={() => formMethods.clearErrors("apiError")}
             disabled={isDisabled || passwordMutation.isLoading || sessionMutation.isLoading}>
             {t("update")}
           </Button>
@@ -205,5 +210,6 @@ const PasswordView = () => {
 };
 
 PasswordView.getLayout = getLayout;
+PasswordView.PageWrapper = PageWrapper;
 
 export default PasswordView;
