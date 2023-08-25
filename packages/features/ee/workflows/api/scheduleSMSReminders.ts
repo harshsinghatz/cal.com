@@ -1,11 +1,12 @@
 /* Schedule any workflow reminder that falls within 7 days for SMS */
-import { WorkflowActions, WorkflowMethods, WorkflowTemplates } from "@prisma/client";
 import type { NextApiRequest, NextApiResponse } from "next";
 
 import dayjs from "@calcom/dayjs";
 import { getCalEventResponses } from "@calcom/features/bookings/lib/getCalEventResponses";
 import { defaultHandler } from "@calcom/lib/server";
+import { getTimeFormatStringFromUserTimeFormat } from "@calcom/lib/timeFormat";
 import prisma from "@calcom/prisma";
+import { WorkflowActions, WorkflowMethods, WorkflowTemplates } from "@calcom/prisma/enums";
 import { bookingMetadataSchema } from "@calcom/prisma/zod-utils";
 
 import { getSenderId } from "../lib/alphanumericSenderIdSupport";
@@ -52,7 +53,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     },
   });
 
-  if (!unscheduledReminders.length) res.json({ ok: true });
+  if (!unscheduledReminders.length) {
+    res.json({ ok: true });
+    return;
+  }
 
   for (const reminder of unscheduledReminders) {
     if (!reminder.workflowStep || !reminder.booking) {
@@ -113,13 +117,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         const customMessage = customTemplate(
           reminder.workflowStep.reminderBody || "",
           variables,
-          locale || ""
+          locale || "en",
+          getTimeFormatStringFromUserTimeFormat(reminder.booking.user?.timeFormat)
         );
         message = customMessage.text;
       } else if (reminder.workflowStep.template === WorkflowTemplates.REMINDER) {
         message = smsReminderTemplate(
           false,
           reminder.workflowStep.action,
+          getTimeFormatStringFromUserTimeFormat(reminder.booking.user?.timeFormat),
           reminder.booking?.startTime.toISOString() || "",
           reminder.booking?.eventType?.title || "",
           timeZone || "",

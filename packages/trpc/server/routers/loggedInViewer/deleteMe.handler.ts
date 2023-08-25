@@ -1,12 +1,11 @@
-import { IdentityProvider } from "@prisma/client";
-import { authenticator } from "otplib";
-
 import { deleteStripeCustomer } from "@calcom/app-store/stripepayment/lib/customer";
 import { ErrorCode } from "@calcom/features/auth/lib/ErrorCode";
 import { verifyPassword } from "@calcom/features/auth/lib/verifyPassword";
 import { symmetricDecrypt } from "@calcom/lib/crypto";
 import { deleteWebUser as syncServicesDeleteWebUser } from "@calcom/lib/sync/SyncServiceManager";
+import { totpAuthenticatorCheck } from "@calcom/lib/totp";
 import { prisma } from "@calcom/prisma";
+import { IdentityProvider } from "@calcom/prisma/enums";
 import type { TrpcSessionUser } from "@calcom/trpc/server/trpc";
 
 import type { TDeleteMeInputSchema } from "./deleteMe.schema";
@@ -66,7 +65,7 @@ export const deleteMeHandler = async ({ ctx, input }: DeleteMeOptions) => {
     }
 
     // If user has 2fa enabled, check if input.totpCode is correct
-    const isValidToken = authenticator.check(input.totpCode, secret);
+    const isValidToken = totpAuthenticatorCheck(input.totpCode, secret);
     if (!isValidToken) {
       throw new Error(ErrorCode.IncorrectTwoFactorCode);
     }

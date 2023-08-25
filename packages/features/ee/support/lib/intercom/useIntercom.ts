@@ -1,3 +1,4 @@
+// eslint-disable-next-line no-restricted-imports
 import { noop } from "lodash";
 import { useIntercom as useIntercomLib } from "react-use-intercom";
 import { z } from "zod";
@@ -35,9 +36,9 @@ export const useIntercom = () => {
     }
 
     hookData.boot({
-      name: data?.name ?? "",
-      email: data?.email,
-      userId: String(data?.id),
+      ...(data && data?.name && { name: data.name }),
+      ...(data && data?.email && { email: data.email }),
+      ...(data && data?.id && { userId: data.id }),
       createdAt: String(dayjs(data?.createdDate).unix()),
       ...(userHash && { userHash }),
       customAttributes: {
@@ -50,6 +51,7 @@ export const useIntercom = () => {
         has_paid_plan: hasPaidPlan,
         has_team_plan: hasTeamPlan,
         metadata: data?.metadata,
+        is_logged_in: !!data,
       },
     });
     hookData.show();

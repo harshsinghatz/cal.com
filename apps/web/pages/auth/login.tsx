@@ -1,13 +1,15 @@
+import { zodResolver } from "@hookform/resolvers/zod";
 import classNames from "classnames";
 import { jwtVerify } from "jose";
 import type { GetServerSidePropsContext } from "next";
 import { getCsrfToken, signIn } from "next-auth/react";
 import Link from "next/link";
-import { useRouter } from "next/router";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { CSSProperties } from "react";
 import { useState } from "react";
 import { FormProvider, useForm } from "react-hook-form";
 import { FaGoogle } from "react-icons/fa";
+import { z } from "zod";
 
 import { SAMLLogin } from "@calcom/features/auth/SAMLLogin";
 import { ErrorCode } from "@calcom/features/auth/lib/ErrorCode";
@@ -39,7 +41,6 @@ interface LoginValues {
   totpCode: string;
   csrfToken: string;
 }
-
 export default function Login({
   csrfToken,
   isGoogleLoginEnabled,
@@ -48,10 +49,20 @@ export default function Login({
   samlProductID,
   totpEmail,
 }: inferSSRProps<typeof _getServerSideProps> & WithNonceProps) {
+  const searchParams = useSearchParams();
   const { t } = useLocale();
   const router = useRouter();
-  const methods = useForm<LoginValues>();
-
+  const formSchema = z
+    .object({
+      email: z
+        .string()
+        .min(1, `${t("error_required_field")}`)
+        .email(`${t("enter_valid_email")}`),
+      password: !!totpEmail ? z.literal("") : z.string().min(1, `${t("error_required_field")}`),
+    })
+    // Passthrough other fields like totpCode
+    .passthrough();
+  const methods = useForm<LoginValues>({ resolver: zodResolver(formSchema) });
   const { register, formState } = methods;
   const [twoFactorRequired, setTwoFactorRequired] = useState(!!totpEmail || false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -59,7 +70,7 @@ export default function Login({
   const errorMessages: { [key: string]: string } = {
     // [ErrorCode.SecondFactorRequired]: t("2fa_enabled_instructions"),
     // Don't leak information about whether an email is registered or not
-    [ErrorCode.IncorrectUsernamePassword]: t("incorrect_username_password"),
+    [ErrorCode.IncorrectEmailPassword]: t("incorrect_email_password"),
     [ErrorCode.IncorrectTwoFactorCode]: `${t("incorrect_2fa_code")} ${t("please_try_again")}`,
     [ErrorCode.InternalServerError]: `${t("something_went_wrong")} ${t("please_try_again_and_contact_us")}`,
     [ErrorCode.ThirdPartyIdentityProviderEnabled]: t("account_created_with_identity_provider"),
@@ -67,7 +78,7 @@ export default function Login({
 
   const telemetry = useTelemetry();
 
-  let callbackUrl = typeof router.query?.callbackUrl === "string" ? router.query.callbackUrl : "";
+  let callbackUrl = searchParams.get("callbackUrl") || "";
 
   if (/"\//.test(callbackUrl)) callbackUrl = callbackUrl.substring(1);
 
@@ -150,7 +161,7 @@ export default function Login({
             : null
         }>
         <FormProvider {...methods}>
-          <form onSubmit={methods.handleSubmit(onSubmit)} data-testid="login-form">
+          <form onSubmit={methods.handleSubmit(onSubmit)} noValidate data-testid="login-form">
             <div>
               <input defaultValue={csrfToken || undefined} type="hidden" hidden {...register("csrfToken")} />
             </div>
@@ -159,7 +170,7 @@ export default function Login({
                 <EmailField
                   id="email"
                   label={t("email_address")}
-                  defaultValue={totpEmail || (router.query.email as string)}
+                  defaultValue={totpEmail || (searchParams?.get("email") as string)}
                   placeholder="john.doe@example.com"
                   required
                   {...register("email")}
@@ -172,7 +183,7 @@ export default function Login({
                     className="mb-0"
                     {...register("password")}
                   />
-                  <div className="absolute -top-1.5 ltr:right-0 rtl:left-0">
+                  <div className="absolute -top-[2px] ltr:right-0 rtl:left-0">
                     <Link
                       href="/auth/forgot-password"
                       tabIndex={-1}

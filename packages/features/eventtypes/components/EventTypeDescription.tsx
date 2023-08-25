@@ -1,5 +1,4 @@
 import type { Prisma } from "@prisma/client";
-import { SchedulingType } from "@prisma/client";
 import { useMemo } from "react";
 import type { z } from "zod";
 
@@ -7,6 +6,7 @@ import { classNames, parseRecurringEvent } from "@calcom/lib";
 import getPaymentAppData from "@calcom/lib/getPaymentAppData";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import type { baseEventTypeSelect } from "@calcom/prisma";
+import { SchedulingType } from "@calcom/prisma/enums";
 import type { EventTypeModel } from "@calcom/prisma/zod";
 import { Badge } from "@calcom/ui";
 import { Clock, Users, RefreshCw, CreditCard, Clipboard, Plus, User, Lock } from "@calcom/ui/components/icon";
@@ -46,7 +46,7 @@ export const EventTypeDescription = ({
         {eventType.description && (
           <div
             className={classNames(
-              "text-subtle max-w-[280px] break-words py-1 text-sm sm:max-w-[500px] [&_a]:text-blue-500 [&_a]:underline [&_a]:hover:text-blue-600",
+              "text-subtle line-clamp-3 max-w-[280px] break-words py-1 text-sm sm:max-w-[650px] [&_a]:text-blue-500 [&_a]:underline [&_a]:hover:text-blue-600",
               shortenDescription ? "line-clamp-4" : ""
             )}
             dangerouslySetInnerHTML={{

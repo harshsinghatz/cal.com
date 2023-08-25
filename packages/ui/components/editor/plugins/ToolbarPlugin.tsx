@@ -358,6 +358,7 @@ export default function ToolbarPlugin(props: TextEditorProps) {
         }
       });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.updateTemplate]);
 
   useEffect(() => {
@@ -381,6 +382,7 @@ export default function ToolbarPlugin(props: TextEditorProps) {
         });
       });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -392,7 +394,7 @@ export default function ToolbarPlugin(props: TextEditorProps) {
       }),
       editor.registerCommand(
         SELECTION_CHANGE_COMMAND,
-        (_payload, newEditor) => {
+        (_payload, _newEditor) => {
           updateToolbar();
           return false;
         },
@@ -459,9 +461,6 @@ export default function ToolbarPlugin(props: TextEditorProps) {
               StartIcon={Bold}
               onClick={() => {
                 editor.dispatchCommand(FORMAT_TEXT_COMMAND, "bold");
-                if (isItalic) {
-                  editor.dispatchCommand(FORMAT_TEXT_COMMAND, "italic");
-                }
               }}
               className={isBold ? "bg-subtle" : ""}
             />
@@ -474,9 +473,6 @@ export default function ToolbarPlugin(props: TextEditorProps) {
               StartIcon={Italic}
               onClick={() => {
                 editor.dispatchCommand(FORMAT_TEXT_COMMAND, "italic");
-                if (isItalic) {
-                  editor.dispatchCommand(FORMAT_TEXT_COMMAND, "bold");
-                }
               }}
               className={isItalic ? "bg-subtle" : ""}
             />

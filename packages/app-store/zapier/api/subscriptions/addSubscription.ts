@@ -1,4 +1,4 @@
-import { BookingStatus, WebhookTriggerEvents } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { v4 } from "uuid";
 
@@ -6,6 +6,7 @@ import { scheduleTrigger } from "@calcom/app-store/zapier/lib/nodeScheduler";
 import findValidApiKey from "@calcom/features/ee/api-keys/lib/findValidApiKey";
 import { defaultHandler, defaultResponder } from "@calcom/lib/server";
 import prisma from "@calcom/prisma";
+import { BookingStatus, WebhookTriggerEvents } from "@calcom/prisma/enums";
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   const apiKey = req.query.apiKey as string;
@@ -27,6 +28,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       data: {
         id: v4(),
         userId: validKey.userId,
+        teamId: validKey.teamId,
         eventTriggers: [triggerEvent],
         subscriberUrl,
         active: true,
@@ -36,9 +38,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (triggerEvent === WebhookTriggerEvents.MEETING_ENDED) {
       //schedule job for already existing bookings
+      const where: Prisma.BookingWhereInput = {};
+      if (validKey.teamId) where.eventType = { teamId: validKey.teamId };
+      else where.userId = validKey.userId;
       const bookings = await prisma.booking.findMany({
         where: {
-          userId: validKey.userId,
+          ...where,
           startTime: {
             gte: new Date(),
           },

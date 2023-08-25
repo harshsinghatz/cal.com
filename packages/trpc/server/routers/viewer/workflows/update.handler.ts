@@ -1,7 +1,9 @@
 import type { Prisma } from "@prisma/client";
-import { BookingStatus, WorkflowActions, WorkflowMethods, WorkflowTriggerEvents } from "@prisma/client";
 
-import { isSMSAction } from "@calcom/features/ee/workflows/lib/actionHelperFunctions";
+import {
+  isSMSOrWhatsappAction,
+  isTextMessageToAttendeeAction,
+} from "@calcom/features/ee/workflows/lib/actionHelperFunctions";
 import {
   deleteScheduledEmailReminder,
   scheduleEmailReminder,
@@ -10,12 +12,21 @@ import {
   deleteScheduledSMSReminder,
   scheduleSMSReminder,
 } from "@calcom/features/ee/workflows/lib/reminders/smsReminderManager";
-import { SENDER_ID, SENDER_NAME } from "@calcom/lib/constants";
-import type { PrismaClient } from "@calcom/prisma/client";
+import {
+  deleteScheduledWhatsappReminder,
+  scheduleWhatsappReminder,
+} from "@calcom/features/ee/workflows/lib/reminders/whatsappReminderManager";
+import { IS_SELF_HOSTED, SENDER_ID, SENDER_NAME } from "@calcom/lib/constants";
+import hasKeyInMetadata from "@calcom/lib/hasKeyInMetadata";
+import { getTimeFormatStringFromUserTimeFormat } from "@calcom/lib/timeFormat";
+import type { PrismaClient } from "@calcom/prisma";
+import { BookingStatus, WorkflowActions, WorkflowMethods, WorkflowTriggerEvents } from "@calcom/prisma/enums";
 import type { TrpcSessionUser } from "@calcom/trpc/server/trpc";
 
 import { TRPCError } from "@trpc/server";
 
+import { isVerifiedHandler } from "../kycVerification/isVerified.handler";
+import { hasTeamPlanHandler } from "../teams/hasTeamPlan.handler";
 import type { TUpdateInputSchema } from "./update.schema";
 import {
   getSender,
@@ -64,14 +75,57 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     throw new TRPCError({ code: "UNAUTHORIZED" });
   }
 
+  const isCurrentUsernamePremium = hasKeyInMetadata(user, "isPremium") ? !!user.metadata.isPremium : false;
+
+  let isTeamsPlan = false;
+  if (!isCurrentUsernamePremium) {
+    const { hasTeamPlan } = await hasTeamPlanHandler({ ctx });
+    isTeamsPlan = !!hasTeamPlan;
+  }
+  const hasPaidPlan = IS_SELF_HOSTED || isCurrentUsernamePremium || isTeamsPlan;
+
+  const kycVerified = await isVerifiedHandler({ ctx });
+  const isKYCVerified = kycVerified.isKYCVerified;
+
+  const activeOnEventTypes = await ctx.prisma.eventType.findMany({
+    where: {
+      id: {
+        in: activeOn,
+      },
+    },
+    select: {
+      id: true,
+      children: {
+        select: {
+          id: true,
+        },
+      },
+    },
+  });
+
+  const activeOnWithChildren = activeOnEventTypes
+    .map((eventType) => [eventType.id].concat(eventType.children.map((child) => child.id)))
+    .flat();
+
   const oldActiveOnEventTypes = await ctx.prisma.workflowsOnEventTypes.findMany({
     where: {
       workflowId: id,
     },
     select: {
       eventTypeId: true,
+      eventType: {
+        include: {
+          children: true,
+        },
+      },
     },
   });
+
+  const oldActiveOnEventTypeIds = oldActiveOnEventTypes
+    .map((eventTypeRel) =>
+      [eventTypeRel.eventType.id].concat(eventTypeRel.eventType.children.map((child) => child.id))
+    )
+    .flat();
 
   const newActiveEventTypes = activeOn.filter((eventType) => {
     if (
@@ -99,6 +153,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
             members: true,
           },
         },
+        children: true,
       },
     });
 
@@ -119,15 +174,11 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
   }
 
   //remove all scheduled Email and SMS reminders for eventTypes that are not active any more
-  const removedEventTypes = oldActiveOnEventTypes
-    .map((eventType) => {
-      return eventType.eventTypeId;
-    })
-    .filter((eventType) => {
-      if (!activeOn.includes(eventType)) {
-        return eventType;
-      }
-    });
+  const removedEventTypes = oldActiveOnEventTypeIds.filter((eventTypeId) => {
+    if (!activeOnWithChildren.includes(eventTypeId)) {
+      return eventTypeId;
+    }
+  });
 
   const remindersToDeletePromise: Prisma.PrismaPromise<
     {
@@ -170,6 +221,8 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
       deleteScheduledEmailReminder(reminder.id, reminder.referenceId);
     } else if (reminder.method === WorkflowMethods.SMS) {
       deleteScheduledSMSReminder(reminder.id, reminder.referenceId);
+    } else if (reminder.method === WorkflowMethods.WHATSAPP) {
+      deleteScheduledWhatsappReminder(reminder.id, reminder.referenceId);
     }
   });
 
@@ -189,7 +242,16 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
       //create reminders for all bookings with newEventTypes
       const bookingsForReminders = await ctx.prisma.booking.findMany({
         where: {
-          eventTypeId: { in: newEventTypes },
+          OR: [
+            { eventTypeId: { in: newEventTypes } },
+            {
+              eventType: {
+                parentId: {
+                  in: newEventTypes,
+                },
+              },
+            },
+          ],
           status: BookingStatus.ACCEPTED,
           startTime: {
             gte: new Date(),
@@ -203,9 +265,13 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
       });
 
       steps.forEach(async (step) => {
-        if (step.action !== WorkflowActions.SMS_ATTENDEE) {
+        if (
+          step.action !== WorkflowActions.SMS_ATTENDEE &&
+          step.action !== WorkflowActions.WHATSAPP_ATTENDEE
+        ) {
           //as we do not have attendees phone number (user is notified about that when setting this action)
           bookingsForReminders.forEach(async (booking) => {
+            const defaultLocale = "en";
             const bookingInfo = {
               uid: booking.uid,
               attendees: booking.attendees.map((attendee) => {
@@ -213,21 +279,22 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
                   name: attendee.name,
                   email: attendee.email,
                   timeZone: attendee.timeZone,
-                  language: { locale: attendee.locale || "" },
+                  language: { locale: attendee.locale || defaultLocale },
                 };
               }),
               organizer: booking.user
                 ? {
-                    language: { locale: booking.user.locale || "" },
+                    language: { locale: booking.user.locale || defaultLocale },
                     name: booking.user.name || "",
                     email: booking.user.email,
                     timeZone: booking.user.timeZone,
+                    timeFormat: getTimeFormatStringFromUserTimeFormat(booking.user.timeFormat),
                   }
                 : { name: "", email: "", timeZone: "", language: { locale: "" } },
               startTime: booking.startTime.toISOString(),
               endTime: booking.endTime.toISOString(),
               title: booking.title,
-              language: { locale: booking?.user?.locale || "" },
+              language: { locale: booking?.user?.locale || defaultLocale },
               eventType: {
                 slug: booking.eventType?.slug,
               },
@@ -237,14 +304,14 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
               step.action === WorkflowActions.EMAIL_ATTENDEE /*||
                   step.action === WorkflowActions.EMAIL_ADDRESS*/
             ) {
-              let sendTo = "";
+              let sendTo: string[] = [];
 
               switch (step.action) {
                 case WorkflowActions.EMAIL_HOST:
-                  sendTo = bookingInfo.organizer?.email;
+                  sendTo = [bookingInfo.organizer?.email];
                   break;
                 case WorkflowActions.EMAIL_ATTENDEE:
-                  sendTo = bookingInfo.attendees[0].email;
+                  sendTo = bookingInfo.attendees.map((attendee) => attendee.email);
                   break;
                 /*case WorkflowActions.EMAIL_ADDRESS:
                       sendTo = step.sendTo || "";*/
@@ -282,19 +349,46 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
                 user.id,
                 userWorkflow.teamId
               );
+            } else if (step.action === WorkflowActions.WHATSAPP_NUMBER) {
+              await scheduleWhatsappReminder(
+                bookingInfo,
+                step.sendTo || "",
+                trigger,
+                step.action,
+                {
+                  time,
+                  timeUnit,
+                },
+                step.reminderBody || "",
+                step.id || 0,
+                step.template,
+                user.id,
+                userWorkflow.teamId
+              );
             }
           });
         }
       });
     }
     //create all workflow - eventtypes relationships
-    activeOn.forEach(async (eventTypeId) => {
+    activeOnEventTypes.forEach(async (eventType) => {
       await ctx.prisma.workflowsOnEventTypes.createMany({
         data: {
           workflowId: id,
-          eventTypeId,
+          eventTypeId: eventType.id,
         },
       });
+
+      if (eventType.children.length) {
+        eventType.children.forEach(async (chEventType) => {
+          await ctx.prisma.workflowsOnEventTypes.createMany({
+            data: {
+              workflowId: id,
+              eventTypeId: chEventType.id,
+            },
+          });
+        });
+      }
     });
   }
 
@@ -318,6 +412,8 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
             deleteScheduledEmailReminder(reminder.id, reminder.referenceId);
           } else if (reminder.method === WorkflowMethods.SMS) {
             deleteScheduledSMSReminder(reminder.id, reminder.referenceId);
+          } else if (reminder.method === WorkflowMethods.WHATSAPP) {
+            deleteScheduledWhatsappReminder(reminder.id, reminder.referenceId);
           }
         });
       }
@@ -329,25 +425,24 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
 
       //step was edited
     } else if (JSON.stringify(oldStep) !== JSON.stringify(newStep)) {
-      if (
-        !userWorkflow.teamId &&
-        !userWorkflow.user?.teams.length &&
-        !isSMSAction(oldStep.action) &&
-        isSMSAction(newStep.action)
-      ) {
+      if (!hasPaidPlan && !isSMSOrWhatsappAction(oldStep.action) && isSMSOrWhatsappAction(newStep.action)) {
         throw new TRPCError({ code: "UNAUTHORIZED" });
       }
+      if (!isKYCVerified && isTextMessageToAttendeeAction(newStep.action)) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Account needs to be verified" });
+      }
+      const requiresSender =
+        newStep.action === WorkflowActions.SMS_NUMBER || newStep.action === WorkflowActions.WHATSAPP_NUMBER;
       await ctx.prisma.workflowStep.update({
         where: {
           id: oldStep.id,
         },
         data: {
           action: newStep.action,
-          sendTo:
-            newStep.action === WorkflowActions.SMS_NUMBER /*||
+          sendTo: requiresSender /*||
                 newStep.action === WorkflowActions.EMAIL_ADDRESS*/
-              ? newStep.sendTo
-              : null,
+            ? newStep.sendTo
+            : null,
           stepNumber: newStep.stepNumber,
           workflowId: newStep.workflowId,
           reminderBody: newStep.reminderBody,
@@ -403,6 +498,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
           },
         });
         bookingsOfEventTypes.forEach(async (booking) => {
+          const defaultLocale = "en";
           const bookingInfo = {
             uid: booking.uid,
             attendees: booking.attendees.map((attendee) => {
@@ -410,21 +506,22 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
                 name: attendee.name,
                 email: attendee.email,
                 timeZone: attendee.timeZone,
-                language: { locale: attendee.locale || "" },
+                language: { locale: attendee.locale || defaultLocale },
               };
             }),
             organizer: booking.user
               ? {
-                  language: { locale: booking.user.locale || "" },
+                  language: { locale: booking.user.locale || defaultLocale },
                   name: booking.user.name || "",
                   email: booking.user.email,
                   timeZone: booking.user.timeZone,
+                  timeFormat: getTimeFormatStringFromUserTimeFormat(booking.user.timeFormat),
                 }
               : { name: "", email: "", timeZone: "", language: { locale: "" } },
             startTime: booking.startTime.toISOString(),
             endTime: booking.endTime.toISOString(),
             title: booking.title,
-            language: { locale: booking?.user?.locale || "" },
+            language: { locale: booking?.user?.locale || defaultLocale },
             eventType: {
               slug: booking.eventType?.slug,
             },
@@ -434,14 +531,14 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
             newStep.action === WorkflowActions.EMAIL_ATTENDEE /*||
                 newStep.action === WorkflowActions.EMAIL_ADDRESS*/
           ) {
-            let sendTo = "";
+            let sendTo: string[] = [];
 
             switch (newStep.action) {
               case WorkflowActions.EMAIL_HOST:
-                sendTo = bookingInfo.organizer?.email;
+                sendTo = [bookingInfo.organizer?.email];
                 break;
               case WorkflowActions.EMAIL_ATTENDEE:
-                sendTo = bookingInfo.attendees[0].email;
+                sendTo = bookingInfo.attendees.map((attendee) => attendee.email);
                 break;
               /*case WorkflowActions.EMAIL_ADDRESS:
                     sendTo = newStep.sendTo || "";*/
@@ -479,6 +576,22 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
               user.id,
               userWorkflow.teamId
             );
+          } else if (newStep.action === WorkflowActions.WHATSAPP_NUMBER) {
+            await scheduleWhatsappReminder(
+              bookingInfo,
+              newStep.sendTo || "",
+              trigger,
+              newStep.action,
+              {
+                time,
+                timeUnit,
+              },
+              newStep.reminderBody || "",
+              newStep.id || 0,
+              newStep.template,
+              user.id,
+              userWorkflow.teamId
+            );
           }
         });
       }
@@ -487,8 +600,11 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
   //added steps
   const addedSteps = steps.map((s) => {
     if (s.id <= 0) {
-      if (!userWorkflow.user?.teams.length && isSMSAction(s.action)) {
+      if (isSMSOrWhatsappAction(s.action) && !hasPaidPlan) {
         throw new TRPCError({ code: "UNAUTHORIZED" });
+      }
+      if (!isKYCVerified && isTextMessageToAttendeeAction(s.action)) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Account needs to be verified" });
       }
       const { id: _stepId, ...stepToAdd } = s;
       return stepToAdd;
@@ -515,7 +631,8 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
         if (
           (trigger === WorkflowTriggerEvents.BEFORE_EVENT || trigger === WorkflowTriggerEvents.AFTER_EVENT) &&
           eventTypesToCreateReminders &&
-          step.action !== WorkflowActions.SMS_ATTENDEE
+          step.action !== WorkflowActions.SMS_ATTENDEE &&
+          step.action !== WorkflowActions.WHATSAPP_ATTENDEE
         ) {
           const bookingsForReminders = await ctx.prisma.booking.findMany({
             where: {
@@ -531,7 +648,8 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
               user: true,
             },
           });
-          bookingsForReminders.forEach(async (booking) => {
+          for (const booking of bookingsForReminders) {
+            const defaultLocale = "en";
             const bookingInfo = {
               uid: booking.uid,
               attendees: booking.attendees.map((attendee) => {
@@ -539,7 +657,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
                   name: attendee.name,
                   email: attendee.email,
                   timeZone: attendee.timeZone,
-                  language: { locale: attendee.locale || "" },
+                  language: { locale: attendee.locale || defaultLocale },
                 };
               }),
               organizer: booking.user
@@ -547,13 +665,14 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
                     name: booking.user.name || "",
                     email: booking.user.email,
                     timeZone: booking.user.timeZone,
-                    language: { locale: booking.user.locale || "" },
+                    timeFormat: getTimeFormatStringFromUserTimeFormat(booking.user.timeFormat),
+                    language: { locale: booking.user.locale || defaultLocale },
                   }
                 : { name: "", email: "", timeZone: "", language: { locale: "" } },
               startTime: booking.startTime.toISOString(),
               endTime: booking.endTime.toISOString(),
               title: booking.title,
-              language: { locale: booking?.user?.locale || "" },
+              language: { locale: booking?.user?.locale || defaultLocale },
               eventType: {
                 slug: booking.eventType?.slug,
               },
@@ -564,14 +683,14 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
               step.action === WorkflowActions.EMAIL_HOST /*||
                   step.action === WorkflowActions.EMAIL_ADDRESS*/
             ) {
-              let sendTo = "";
+              let sendTo: string[] = [];
 
               switch (step.action) {
                 case WorkflowActions.EMAIL_HOST:
-                  sendTo = bookingInfo.organizer?.email;
+                  sendTo = [bookingInfo.organizer?.email];
                   break;
                 case WorkflowActions.EMAIL_ATTENDEE:
-                  sendTo = bookingInfo.attendees[0].email;
+                  sendTo = bookingInfo.attendees.map((attendee) => attendee.email);
                   break;
                 /*case WorkflowActions.EMAIL_ADDRESS:
                       sendTo = step.sendTo || "";*/
@@ -609,8 +728,24 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
                 user.id,
                 userWorkflow.teamId
               );
+            } else if (step.action === WorkflowActions.WHATSAPP_NUMBER && step.sendTo) {
+              await scheduleWhatsappReminder(
+                bookingInfo,
+                step.sendTo,
+                trigger,
+                step.action,
+                {
+                  time,
+                  timeUnit,
+                },
+                step.reminderBody || "",
+                createdStep.id,
+                step.template,
+                user.id,
+                userWorkflow.teamId
+              );
             }
-          });
+          }
         }
       }
     });
@@ -644,6 +779,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
           id: true,
           slug: true,
           members: true,
+          name: true,
         },
       },
       steps: {
@@ -656,7 +792,11 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
 
   // Remove or add booking field for sms reminder number
   const smsReminderNumberNeeded =
-    activeOn.length && steps.some((step) => step.action === WorkflowActions.SMS_ATTENDEE);
+    activeOn.length &&
+    steps.some(
+      (step) =>
+        step.action === WorkflowActions.SMS_ATTENDEE || step.action === WorkflowActions.WHATSAPP_ATTENDEE
+    );
 
   for (const removedEventType of removedEventTypes) {
     await removeSmsReminderFieldForBooking({
@@ -665,12 +805,14 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     });
   }
 
-  for (const eventTypeId of activeOn) {
+  for (const eventTypeId of activeOnWithChildren) {
     if (smsReminderNumberNeeded) {
       await upsertSmsReminderFieldForBooking({
         workflowId: id,
         isSmsReminderNumberRequired: steps.some(
-          (s) => s.action === WorkflowActions.SMS_ATTENDEE && s.numberRequired
+          (s) =>
+            (s.action === WorkflowActions.SMS_ATTENDEE || s.action === WorkflowActions.WHATSAPP_ATTENDEE) &&
+            s.numberRequired
         ),
         eventTypeId,
       });

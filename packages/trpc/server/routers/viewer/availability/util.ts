@@ -1,6 +1,6 @@
 import type { Availability as AvailabilityModel, Schedule as ScheduleModel, User } from "@prisma/client";
 
-import type { PrismaClient } from "@calcom/prisma/client";
+import type { PrismaClient } from "@calcom/prisma";
 import type { Schedule } from "@calcom/types/schedule";
 
 export const getDefaultScheduleId = async (userId: number, prisma: PrismaClient) => {
@@ -27,7 +27,12 @@ export const getDefaultScheduleId = async (userId: number, prisma: PrismaClient)
     },
   });
 
-  return defaultSchedule?.id; // TODO: Handle no schedules AT ALL
+  if (!defaultSchedule) {
+    // Handle case where defaultSchedule is null by throwing an error
+    throw new Error("No schedules found for user");
+  }
+
+  return defaultSchedule.id;
 };
 
 export const hasDefaultSchedule = async (user: Partial<User>, prisma: PrismaClient) => {

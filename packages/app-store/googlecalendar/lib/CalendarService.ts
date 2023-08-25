@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Prisma } from "@prisma/client";
 import type { calendar_v3 } from "googleapis";
 import { google } from "googleapis";
@@ -57,7 +58,20 @@ export default class GoogleCalendarService implements Calendar {
         });
         myGoogleAuth.setCredentials(googleCredentials);
       } catch (err) {
-        this.log.error("Error refreshing google token", err);
+        let message;
+        if (err instanceof Error) message = err.message;
+        else message = String(err);
+        // if not invalid_grant, default behaviour (which admittedly isn't great)
+        if (message !== "invalid_grant") return myGoogleAuth;
+        // when the error is invalid grant, it's unrecoverable and the credential marked invalid.
+        // TODO: Evaluate bubbling up and handling this in the CalendarManager. IMO this should be done
+        //       but this is a bigger refactor.
+        await prisma.credential.update({
+          where: { id: credential.id },
+          data: {
+            invalid: true,
+          },
+        });
       }
       return myGoogleAuth;
     };
@@ -71,7 +85,7 @@ export default class GoogleCalendarService implements Calendar {
   };
 
   async createEvent(calEventRaw: CalendarEvent): Promise<NewCalendarEventType> {
-    const eventAttendees = calEventRaw.attendees.map(({ id, ...rest }) => ({
+    const eventAttendees = calEventRaw.attendees.map(({ id: _id, ...rest }) => ({
       ...rest,
       responseStatus: "accepted",
     }));
@@ -175,7 +189,7 @@ export default class GoogleCalendarService implements Calendar {
   async updateEvent(uid: string, event: CalendarEvent, externalCalendarId: string): Promise<any> {
     return new Promise(async (resolve, reject) => {
       const myGoogleAuth = await this.auth.getToken();
-      const eventAttendees = event.attendees.map(({ id, ...rest }) => ({
+      const eventAttendees = event.attendees.map(({ ...rest }) => ({
         ...rest,
         responseStatus: "accepted",
       }));
@@ -206,9 +220,8 @@ export default class GoogleCalendarService implements Calendar {
               ? event.destinationCalendar.externalId
               : event.organizer.email,
           },
-          // eslint-disable-next-line
-          ...eventAttendees,
-          ...teamMembers,
+          ...(eventAttendees as any),
+          ...(teamMembers as any),
         ],
         reminders: {
           useDefault: true,
@@ -339,7 +352,9 @@ export default class GoogleCalendarService implements Calendar {
 
       (selectedCalendarIds.length === 0
         ? calendar.calendarList
-            .list()
+            .list({
+              fields: "items(id)",
+            })
             .then((cals) => cals.data.items?.map((cal) => cal.id).filter(Boolean) || [])
         : Promise.resolve(selectedCalendarIds)
       )
@@ -365,7 +380,6 @@ export default class GoogleCalendarService implements Calendar {
                 });
                 return c;
               }, [] as Prisma.PromiseReturnType<CalendarService["getAvailability"]>);
-
               resolve(result);
             }
           );
@@ -387,7 +401,9 @@ export default class GoogleCalendarService implements Calendar {
       });
 
       calendar.calendarList
-        .list()
+        .list({
+          fields: "items(id,summary,primary,accessRole)",
+        })
         .then((cals) => {
           resolve(
             cals.data.items?.map((cal) => {
@@ -396,7 +412,7 @@ export default class GoogleCalendarService implements Calendar {
                 integration: this.integrationName,
                 name: cal.summary ?? "No name",
                 primary: cal.primary ?? false,
-                readOnly: !(cal.accessRole === "reader" || cal.accessRole === "owner") && true,
+                readOnly: !(cal.accessRole === "writer" || cal.accessRole === "owner") && true,
                 email: cal.id ?? "",
               };
               return calendar;

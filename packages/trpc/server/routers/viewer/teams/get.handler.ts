@@ -1,7 +1,6 @@
-import type { MembershipRole } from "@prisma/client";
-
 import { markdownToSafeHTML } from "@calcom/lib/markdownToSafeHTML";
 import { getTeamWithMembers } from "@calcom/lib/server/queries/teams";
+import type { MembershipRole } from "@calcom/prisma/enums";
 
 import { TRPCError } from "@trpc/server";
 
@@ -16,7 +15,10 @@ type GetOptions = {
 };
 
 export const getHandler = async ({ ctx, input }: GetOptions) => {
-  const team = await getTeamWithMembers(input.teamId, undefined, ctx.user.id);
+  const team = await getTeamWithMembers({
+    id: input.teamId,
+    userId: ctx.user.organization?.isOrgAdmin ? undefined : ctx.user.id,
+  });
 
   if (!team) {
     throw new TRPCError({ code: "NOT_FOUND", message: "Team not found." });

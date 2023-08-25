@@ -32,18 +32,28 @@ export const getHandler = async ({ ctx, input }: GetOptions) => {
       timeZone: true,
       eventType: {
         select: {
-          _count: true,
           id: true,
           eventName: true,
+          team: {
+            select: { members: { select: { userId: true } } },
+          },
         },
       },
     },
   });
-  if (!schedule || (schedule.userId !== user.id && !input.isManagedEventType)) {
+
+  const isCurrentUserPartOfTeam = schedule?.eventType.some((eventType) =>
+    eventType.team?.members.some((teamMember) => teamMember.userId === user.id)
+  );
+
+  const isCurrentUserOwner = schedule?.userId === user.id;
+
+  if (!schedule || (!isCurrentUserOwner && !isCurrentUserPartOfTeam)) {
     throw new TRPCError({
       code: "UNAUTHORIZED",
     });
   }
+
   const timeZone = schedule.timeZone || user.timeZone;
 
   const schedulesCount = await prisma.schedule.count({
@@ -51,11 +61,15 @@ export const getHandler = async ({ ctx, input }: GetOptions) => {
       userId: user.id,
     },
   });
+  // disabling utc casting while fetching WorkingHours
   return {
     id: schedule.id,
     name: schedule.name,
     isManaged: schedule.userId !== user.id,
-    workingHours: getWorkingHours({ timeZone: schedule.timeZone || undefined }, schedule.availability || []),
+    workingHours: getWorkingHours(
+      { timeZone: schedule.timeZone || undefined, utcOffset: 0 },
+      schedule.availability || []
+    ),
     schedule: schedule.availability,
     availability: convertScheduleToAvailability(schedule).map((a) =>
       a.map((startAndEnd) => ({
@@ -96,5 +110,6 @@ export const getHandler = async ({ ctx, input }: GetOptions) => {
     }, [] as { ranges: TimeRange[] }[]),
     isDefault: !input.scheduleId || user.defaultScheduleId === schedule.id,
     isLastSchedule: schedulesCount <= 1,
+    readOnly: schedule.userId !== user.id && !input.isManagedEventType,
   };
 };

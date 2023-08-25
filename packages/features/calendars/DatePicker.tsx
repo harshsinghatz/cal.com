@@ -1,13 +1,15 @@
-import { ChevronLeftIcon, ChevronRightIcon } from "@heroicons/react/solid";
+import { shallow } from "zustand/shallow";
 
 import type { Dayjs } from "@calcom/dayjs";
 import dayjs from "@calcom/dayjs";
 import { useEmbedStyles } from "@calcom/embed-core/embed-iframe";
+import { useBookerStore } from "@calcom/features/bookings/Booker/store";
 import classNames from "@calcom/lib/classNames";
 import { daysInMonth, yyyymmdd } from "@calcom/lib/date-fns";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { weekdayNames } from "@calcom/lib/weekday";
 import { Button, SkeletonText } from "@calcom/ui";
+import { ChevronLeft, ChevronRight } from "@calcom/ui/components/icon";
 import { ArrowRight } from "@calcom/ui/components/icon";
 
 export type DatePickerProps = {
@@ -17,8 +19,8 @@ export type DatePickerProps = {
   onChange: (date: Dayjs) => void;
   /** Fires when the month is changed. */
   onMonthChange?: (date: Dayjs) => void;
-  /** which date is currently selected (not tracked from here) */
-  selected?: Dayjs | null;
+  /** which date or dates are currently selected (not tracked from here) */
+  selected?: Dayjs | Dayjs[] | null;
   /** defaults to current date. */
   minDate?: Dayjs;
   /** Furthest date selectable in the future, default = UNLIMITED */
@@ -33,6 +35,8 @@ export type DatePickerProps = {
   className?: string;
   /** Shows a small loading spinner next to the month name */
   isLoading?: boolean;
+  /** used to query the multiple selected dates */
+  eventSlug?: string;
 };
 
 export const Day = ({
@@ -44,6 +48,7 @@ export const Day = ({
   active: boolean;
   date: Dayjs;
 }) => {
+  const { t } = useLocale();
   const enabledDateButtonEmbedStyles = useEmbedStyles("enabledDateButton");
   const disabledDateButtonEmbedStyles = useEmbedStyles("disabledDateButton");
   return (
@@ -51,7 +56,7 @@ export const Day = ({
       type="button"
       style={disabled ? { ...disabledDateButtonEmbedStyles } : { ...enabledDateButtonEmbedStyles }}
       className={classNames(
-        "disabled:text-bookinglighter absolute top-0 left-0 right-0 bottom-0 mx-auto w-full rounded-md border-2 border-transparent text-center text-sm font-medium disabled:cursor-default disabled:border-transparent disabled:font-light ",
+        "disabled:text-bookinglighter absolute bottom-0 left-0 right-0 top-0 mx-auto w-full rounded-md border-2 border-transparent text-center text-sm font-medium disabled:cursor-default disabled:border-transparent disabled:font-light ",
         active
           ? "bg-brand-default text-brand"
           : !disabled
@@ -64,7 +69,13 @@ export const Day = ({
       {...props}>
       {date.date()}
       {date.isToday() && (
-        <span className="absolute left-0 right-0 bottom-0 h-2/5 align-middle text-4xl leading-[0rem]">.</span>
+        <span
+          className={classNames(
+            "bg-brand-default absolute left-1/2 top-1/2 flex h-[5px] w-[5px] -translate-x-1/2 translate-y-[8px] items-center justify-center rounded-full align-middle sm:translate-y-[12px]",
+            active && "invert"
+          )}>
+          <span className="sr-only">{t("today")}</span>
+        </span>
       )}
     </button>
   );
@@ -80,7 +91,7 @@ const NoAvailabilityOverlay = ({
   const { t } = useLocale();
 
   return (
-    <div className=" bg-muted border-subtle absolute top-40 left-1/2 -mt-10 w-max -translate-x-1/2 -translate-y-1/2 transform rounded-md border p-8 shadow-sm">
+    <div className=" bg-muted border-subtle absolute left-1/2 top-40 -mt-10 w-max -translate-x-1/2 -translate-y-1/2 transform rounded-md border p-8 shadow-sm">
       <h4 className="text-emphasis  mb-4 font-medium">{t("no_availability_in_month", { month: month })}</h4>
       <Button onClick={nextMonthButton} color="primary" EndIcon={ArrowRight}>
         {t("view_next_month")}
@@ -98,6 +109,7 @@ const Days = ({
   selected,
   month,
   nextMonthButton,
+  eventSlug,
   ...props
 }: Omit<DatePickerProps, "locale" | "className" | "weekStart"> & {
   DayComponent?: React.FC<React.ComponentProps<typeof Day>>;
@@ -107,7 +119,7 @@ const Days = ({
   nextMonthButton: () => void;
 }) => {
   // Create placeholder elements for empty days in first week
-  const weekdayOfFirst = browsingDate.day();
+  const weekdayOfFirst = browsingDate.date(1).day();
   const currentDate = minDate.utcOffset(browsingDate.utcOffset());
   const availableDates = (includedDates: string[] | undefined) => {
     const dates = [];
@@ -136,6 +148,33 @@ const Days = ({
     days.push(date);
   }
 
+  const [selectedDatesAndTimes] = useBookerStore((state) => [state.selectedDatesAndTimes], shallow);
+
+  const isActive = (day: dayjs.Dayjs) => {
+    // for selecting a range of dates
+    if (Array.isArray(selected)) {
+      return Array.isArray(selected) && selected?.some((e) => yyyymmdd(e) === yyyymmdd(day));
+    }
+
+    if (selected && yyyymmdd(selected) === yyyymmdd(day)) {
+      return true;
+    }
+
+    // for selecting multiple dates for an event
+    if (
+      eventSlug &&
+      selectedDatesAndTimes &&
+      selectedDatesAndTimes[eventSlug as string] &&
+      Object.keys(selectedDatesAndTimes[eventSlug as string]).length > 0
+    ) {
+      return Object.keys(selectedDatesAndTimes[eventSlug as string]).some((date) => {
+        return yyyymmdd(dayjs(date)) === yyyymmdd(day);
+      });
+    }
+
+    return false;
+  };
+
   return (
     <>
       {days.map((day, idx) => (
@@ -144,7 +183,7 @@ const Days = ({
             <div key={`e-${idx}`} />
           ) : props.isLoading ? (
             <button
-              className=" bg-muted text-muted opcaity-50 absolute top-0 left-0 right-0 bottom-0 mx-auto flex w-full items-center justify-center rounded-sm border-transparent text-center font-medium"
+              className="bg-muted text-muted absolute bottom-0 left-0 right-0 top-0 mx-auto flex w-full items-center justify-center rounded-sm border-transparent text-center font-medium opacity-50"
               key={`e-${idx}`}
               disabled>
               <SkeletonText className="h-4 w-5" />
@@ -159,7 +198,7 @@ const Days = ({
                 (includedDates && !includedDates.includes(yyyymmdd(day))) ||
                 excludedDates.includes(yyyymmdd(day))
               }
-              active={selected ? yyyymmdd(selected) === yyyymmdd(day) : false}
+              active={isActive(day)}
             />
           )}
         </div>
@@ -211,7 +250,7 @@ const DatePicker = ({
           <div className="flex">
             <Button
               className={classNames(
-                "group p-1 opacity-70 hover:opacity-100",
+                "group p-1 opacity-70 hover:opacity-100 rtl:rotate-180",
                 !browsingDate.isAfter(dayjs()) &&
                   "disabled:text-bookinglighter hover:bg-background hover:opacity-70"
               )}
@@ -220,20 +259,20 @@ const DatePicker = ({
               data-testid="decrementMonth"
               color="minimal"
               variant="icon"
-              StartIcon={ChevronLeftIcon}
+              StartIcon={ChevronLeft}
             />
             <Button
-              className="group p-1 opacity-70 hover:opacity-100"
+              className="group p-1 opacity-70 hover:opacity-100 rtl:rotate-180"
               onClick={() => changeMonth(+1)}
               data-testid="incrementMonth"
               color="minimal"
               variant="icon"
-              StartIcon={ChevronRightIcon}
+              StartIcon={ChevronRight}
             />
           </div>
         </div>
       </div>
-      <div className="border-subtle mb-2 grid grid-cols-7 gap-4 border-t border-b text-center md:mb-0 md:border-0">
+      <div className="border-subtle mb-2 grid grid-cols-7 gap-4 border-b border-t text-center md:mb-0 md:border-0">
         {weekdayNames(locale, weekStart, "short").map((weekDay) => (
           <div key={weekDay} className="text-emphasis my-4 text-xs font-medium uppercase tracking-widest">
             {weekDay}

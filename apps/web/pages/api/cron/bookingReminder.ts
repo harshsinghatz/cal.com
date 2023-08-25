@@ -1,4 +1,3 @@
-import { BookingStatus, ReminderType } from "@prisma/client";
 import type { NextApiRequest, NextApiResponse } from "next";
 
 import dayjs from "@calcom/dayjs";
@@ -7,6 +6,7 @@ import { getCalEventResponses } from "@calcom/features/bookings/lib/getCalEventR
 import { isPrismaObjOrUndefined, parseRecurringEvent } from "@calcom/lib";
 import { getTranslation } from "@calcom/lib/server/i18n";
 import prisma, { bookingMinimalSelect } from "@calcom/prisma";
+import { BookingStatus, ReminderType } from "@calcom/prisma/enums";
 import type { CalendarEvent } from "@calcom/types/Calendar";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -31,6 +31,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         },
         // Only send reminders if the event hasn't finished
         endTime: { gte: new Date() },
+        OR: [
+          // no payment required
+          {
+            payment: { none: {} },
+          },
+          // paid but awaiting approval
+          {
+            payment: { some: {} },
+            paid: true,
+          },
+        ],
       },
       select: {
         ...bookingMinimalSelect,

@@ -1,16 +1,17 @@
 import type { Workflow } from "@prisma/client";
+
+import emailReminderTemplate from "@calcom/ee/workflows/lib/reminders/templates/emailReminderTemplate";
+import { SENDER_NAME } from "@calcom/lib/constants";
+import { getTimeFormatStringFromUserTimeFormat } from "@calcom/lib/timeFormat";
+import type { PrismaClient } from "@calcom/prisma";
+import { prisma } from "@calcom/prisma";
 import {
   MembershipRole,
   TimeUnit,
   WorkflowActions,
   WorkflowTemplates,
   WorkflowTriggerEvents,
-} from "@prisma/client";
-
-import emailReminderTemplate from "@calcom/ee/workflows/lib/reminders/templates/emailReminderTemplate";
-import { SENDER_NAME } from "@calcom/lib/constants";
-import { prisma } from "@calcom/prisma";
-import type { PrismaClient } from "@calcom/prisma/client";
+} from "@calcom/prisma/enums";
 import type { TrpcSessionUser } from "@calcom/trpc/server/trpc";
 
 import { TRPCError } from "@trpc/server";
@@ -65,13 +66,19 @@ export const createHandler = async ({ ctx, input }: CreateOptions) => {
       },
     });
 
+    const renderedEmailTemplate = emailReminderTemplate(
+      true,
+      WorkflowActions.EMAIL_ATTENDEE,
+      getTimeFormatStringFromUserTimeFormat(ctx.user.timeFormat)
+    );
+
     await ctx.prisma.workflowStep.create({
       data: {
         stepNumber: 1,
         action: WorkflowActions.EMAIL_ATTENDEE,
         template: WorkflowTemplates.REMINDER,
-        reminderBody: emailReminderTemplate(true, WorkflowActions.EMAIL_ATTENDEE).emailBody,
-        emailSubject: emailReminderTemplate(true, WorkflowActions.EMAIL_ATTENDEE).emailSubject,
+        reminderBody: renderedEmailTemplate.emailBody,
+        emailSubject: renderedEmailTemplate.emailSubject,
         workflowId: workflow.id,
         sender: SENDER_NAME,
         numberVerificationPending: false,

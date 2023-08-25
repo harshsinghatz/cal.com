@@ -1,13 +1,14 @@
-import { UserPermissionRole } from "@prisma/client";
 import type { GetServerSidePropsContext } from "next";
-import { useRouter } from "next/router";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
 import AdminAppsList from "@calcom/features/apps/AdminAppsList";
 import { getServerSession } from "@calcom/features/auth/lib/getServerSession";
 import { getDeploymentKey } from "@calcom/features/ee/deployment/lib/getDeploymentKey";
+import { APP_NAME } from "@calcom/lib/constants";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import prisma from "@calcom/prisma";
+import { UserPermissionRole } from "@calcom/prisma/enums";
 import type { inferSSRProps } from "@calcom/types/inferSSRProps";
 import { Meta, WizardForm } from "@calcom/ui";
 
@@ -18,15 +19,25 @@ import EnterpriseLicense from "@components/setup/EnterpriseLicense";
 
 import { ssrInit } from "@server/lib/ssr";
 
+function useSetStep() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const setStep = (newStep = 1) => {
+    const _searchParams = new URLSearchParams(searchParams);
+    _searchParams.set("step", newStep.toString());
+    router.replace(`${pathname}?${_searchParams.toString()}`);
+  };
+  return setStep;
+}
+
 export function Setup(props: inferSSRProps<typeof getServerSideProps>) {
   const { t } = useLocale();
   const router = useRouter();
   const [value, setValue] = useState(props.isFreeLicense ? "FREE" : "EE");
   const isFreeLicense = value === "FREE";
   const [isEnabledEE, setIsEnabledEE] = useState(!props.isFreeLicense);
-  const setStep = (newStep: number) => {
-    router.replace(`/auth/setup?step=${newStep || 1}`, undefined, { shallow: true });
-  };
+  const setStep = useSetStep();
 
   const steps: React.ComponentProps<typeof WizardForm>["steps"] = [
     {
@@ -95,7 +106,7 @@ export function Setup(props: inferSSRProps<typeof getServerSideProps>) {
 
   steps.push({
     title: t("enable_apps"),
-    description: t("enable_apps_description"),
+    description: t("enable_apps_description", { appName: APP_NAME }),
     contentClassname: "!pb-0 mb-[-1px]",
     content: (setIsLoading) => {
       const currentStep = isFreeLicense ? 3 : 4;
@@ -157,10 +168,13 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
     };
   }
 
-  let deploymentKey = await getDeploymentKey(prisma);
+  const deploymentKey = await prisma.deployment.findUnique({
+    where: { id: 1 },
+    select: { licenseKey: true },
+  });
 
   // Check existant CALCOM_LICENSE_KEY env var and acccount for it
-  if (!!process.env.CALCOM_LICENSE_KEY && !deploymentKey) {
+  if (!!process.env.CALCOM_LICENSE_KEY && !deploymentKey?.licenseKey) {
     await prisma.deployment.upsert({
       where: { id: 1 },
       update: {
@@ -172,10 +186,9 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
         agreedLicenseAt: new Date(),
       },
     });
-    deploymentKey = await getDeploymentKey(prisma);
   }
 
-  const isFreeLicense = deploymentKey === "";
+  const isFreeLicense = (await getDeploymentKey(prisma)) === "";
 
   return {
     props: {
